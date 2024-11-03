@@ -1,0 +1,482 @@
+
+Setup
+
+from google.colab import drive
+drive.mount('/content/drive')
+     
+
+Mounted at /content/drive
+
+
+%cd drive/MyDrive/
+     
+
+!pip install torch
+!pip install transformers
+!pip install datasets
+!pip install accelerate -U
+!pip install nltk
+!python -m nltk.downloader punkt
+     
+
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+import numpy as np
+
+from datasets import load_dataset
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, TextDataset, DataCollatorForLanguageModeling
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+from transformers import BertForSequenceClassification
+
+from transformers import Trainer, TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+from transformers import SchedulerType
+     
+Baseline
+
+tokenizer = AutoTokenizer.from_pretrained('microsoft/DialoGPT-small')
+tokenizer.pad_token = tokenizer.eos_token
+
+model = GPT2LMHeadModel.from_pretrained('microsoft/DialoGPT-small')
+# model=AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-small")
+
+dataset = load_dataset("daily_dialog")
+
+# def preprocess_and_encode(examples):
+#     # Join all utterances in the dialog into a single string with end of sentence token in between
+#     dialog_string = [" ".join(dialog) for dialog in examples['dialog']]
+
+#     # Encode the dialog strings and also set the 'labels' field
+#     encoded = tokenizer(dialog_string, truncation=True, padding='max_length', max_length=128)
+#     encoded['labels'] = encoded['input_ids'][:]
+
+#     return encoded
+
+def preprocess(example):
+    example['dialog'] = " ".join(example['dialog'])
+    return example
+
+dataset = dataset.map(preprocess)
+
+def encode(examples):
+    encoded = tokenizer(examples['dialog'], truncation=True, padding='max_length', max_length=128)
+    encoded['labels'] = encoded['input_ids'][:]
+    return encoded
+
+tokenized_datasets = dataset.map(encode, batched=True)
+
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+training_args = TrainingArguments(
+    output_dir="./DialoGPT-chatbot",
+    overwrite_output_dir=True,
+    num_train_epochs=10,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=64,
+    warmup_steps=0,
+    weight_decay=0.01,
+    learning_rate=5e-5,
+    lr_scheduler_type=SchedulerType.COSINE,
+    save_total_limit=2,
+    prediction_loss_only=True,
+    fp16=True,
+    save_strategy="steps",
+    save_steps=4000,
+    evaluation_strategy="steps",
+    eval_steps=500,
+    load_best_model_at_end=True,
+    metric_for_best_model="loss",
+    seed=42
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    data_collator=data_collator,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"])
+
+# Fine-tune the model
+trainer.train()
+
+trainer.save_model("./DialoGPT-chatbot")
+tokenizer.save_pretrained("./DialoGPT-chatbot")
+     
+
+You're using a GPT2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+
+[6950/6950 14:07, Epoch 10/10]
+Step 	Training Loss 	Validation Loss
+500 	2.907600 	2.485167
+1000 	2.508100 	2.401554
+1500 	2.395700 	2.361978
+2000 	2.292000 	2.324861
+2500 	2.198000 	2.305645
+3000 	2.136500 	2.296316
+3500 	2.087900 	2.287933
+4000 	2.026800 	2.277987
+4500 	1.991900 	2.276940
+5000 	1.956600 	2.276367
+5500 	1.941100 	2.273433
+6000 	1.926300 	2.272633
+6500 	1.913400 	2.273103
+
+('./DialoGPT-chatbot/tokenizer_config.json',
+ './DialoGPT-chatbot/special_tokens_map.json',
+ './DialoGPT-chatbot/vocab.json',
+ './DialoGPT-chatbot/merges.txt',
+ './DialoGPT-chatbot/added_tokens.json',
+ './DialoGPT-chatbot/tokenizer.json')
+
+Evaluation
+
+# Evaludating the model on the validation dataset
+
+eval_results = trainer.evaluate()
+print(eval_results)
+
+# ------------------------------------------------------------------------------
+# Evaluating the model on the test dataset
+
+test_dataset=tokenized_datasets["test"]
+
+# Set the evaluation dataset to the test dataset
+trainer.eval_dataset = test_dataset
+
+# Run the evaluation
+eval_results = trainer.evaluate()
+
+# Print the evaluation results
+print(eval_results)
+     
+[16/16 00:03]
+
+{'eval_loss': 2.277987003326416, 'eval_runtime': 1.8125, 'eval_samples_per_second': 551.72, 'eval_steps_per_second': 8.828, 'epoch': 10.0}
+{'eval_loss': 2.288342237472534, 'eval_runtime': 1.8002, 'eval_samples_per_second': 555.503, 'eval_steps_per_second': 8.888, 'epoch': 10.0}
+
+Talking to the chatbot
+
+tokenizer = AutoTokenizer.from_pretrained('microsoft/DialoGPT-small', padding_side='left')
+model = AutoModelForCausalLM.from_pretrained('./DialoGPT-chatbot')
+
+from transformers import pipeline
+from torch.nn.functional import softmax
+import nltk
+
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+
+model = model.to(device)
+
+
+for step in range(5):
+
+    user_message = input(">> User:")
+
+    user_message = f"{user_message}"
+
+    new_user_input_ids = tokenizer.encode(user_message + tokenizer.eos_token, return_tensors='pt')
+
+    new_user_input_ids = new_user_input_ids.to(device)
+
+    bot_input_ids = new_user_input_ids
+
+    # Generate a response
+    chat_history_ids = model.generate(bot_input_ids, max_length=50, num_return_sequences=1, pad_token_id=tokenizer.eos_token_id, do_sample=True, temperature=0.7)
+
+    # Decode the output and remove special tokens
+    output_text = tokenizer.decode(chat_history_ids[:, bot_input_ids.shape[-1]:][0], skip_special_tokens=True)
+
+    # Split the output into sentences using nltk
+    sentences = nltk.tokenize.sent_tokenize(output_text)
+
+    # Print only the first sentence
+    print(f"DialoGPT: {sentences[0]}")
+
+     
+
+Downloading (…)okenizer_config.json:   0%|          | 0.00/26.0 [00:00<?, ?B/s]
+
+Downloading (…)lve/main/config.json:   0%|          | 0.00/641 [00:00<?, ?B/s]
+
+Downloading (…)olve/main/vocab.json:   0%|          | 0.00/1.04M [00:00<?, ?B/s]
+
+Downloading (…)olve/main/merges.txt:   0%|          | 0.00/456k [00:00<?, ?B/s]
+
+>> User:You look very nice tonight!
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+DialoGPT: It ’ s so nice and bright!
+>> User:What's your name?
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+DialoGPT: My name is John.
+>> User:Where are you from?
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+DialoGPT: We are from England.
+>> User:You like sushis?
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+DialoGPT: Yes.
+>> User:Let's go out!
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+DialoGPT: Let's go for a walk.
+
+Emotion-Aware Chatbot
+
+model = GPT2LMHeadModel.from_pretrained('microsoft/DialoGPT-small')
+tokenizer = AutoTokenizer.from_pretrained('microsoft/DialoGPT-small', padding_side='left')
+tokenizer.pad_token = tokenizer.eos_token
+
+dataset = load_dataset("daily_dialog")
+emotion_dict = {0: 'neutral', 1: 'anger', 2: 'disgust', 3: 'fear', 4: 'happiness', 5: 'sadness', 6: 'surprise'}
+
+
+# def preprocess_and_encode(examples):
+#     # Add emotion tags to both the user's and the agent's utterances
+#     dialog_with_emotions = []
+#     for dialog, emotion in zip(examples['dialog'], examples['emotion']):
+#         dialog_with_emotion = []
+#         for i in range(len(dialog)):
+#             emotion_tag = emotion_dict[emotion[i]]
+#             dialog_with_emotion.append(f"{emotion_tag}: {dialog[i]}")
+
+#         dialog_with_emotions.append(dialog_with_emotion)
+
+#     dialog_string = [" ".join(dialog) for dialog in dialog_with_emotions]
+
+#     encoded = tokenizer(dialog_string, truncation=True, padding='max_length', max_length=128)
+#     encoded['labels'] = encoded['input_ids'][:]
+
+#     return encoded
+
+# tokenized_datasets = dataset.map(preprocess_and_encode, batched=True)
+
+
+def encode_with_emotion(examples):
+    # Add emotion tags to both the user's and the agent's utterances
+    dialog_with_emotions = []
+    for dialog, emotion in zip(examples['dialog'], examples['emotion']):
+        dialog_with_emotion = []
+        for i in range(len(dialog)):
+            emotion_tag = emotion_dict[emotion[i]]
+            dialog_with_emotion.append(f"{emotion_tag}: {dialog[i]}")
+
+        dialog_with_emotions.append(" ".join(dialog_with_emotion))  # Join each dialog into a string
+
+    encoded = tokenizer(dialog_with_emotions, truncation=True, padding='max_length', max_length=128)
+    encoded['labels'] = encoded['input_ids'][:]
+
+    return encoded
+
+encoded_datasets = dataset.map(encode_with_emotion, batched=True)
+
+
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+
+from transformers import SchedulerType
+
+training_args = TrainingArguments(
+    output_dir="./DialoGPT-chatbot-emotion-aware",
+    overwrite_output_dir=True,
+    num_train_epochs=10,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=64,
+    warmup_steps=0,
+    weight_decay=0.01,
+    learning_rate=5e-5,
+    lr_scheduler_type=SchedulerType.COSINE,
+    save_total_limit=2,
+    prediction_loss_only=True,
+    fp16=True,
+    save_strategy="steps",
+    save_steps=4000,
+    evaluation_strategy="steps",
+    eval_steps=500,
+    load_best_model_at_end=True,
+    metric_for_best_model="loss",
+    seed=42
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    data_collator=data_collator,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"]
+)
+
+trainer.train()
+
+trainer.save_model("./DialoGPT-chatbot-emotion-aware")
+tokenizer.save_pretrained("./DialoGPT-chatbot-emotion-aware")
+
+tokenizer = AutoTokenizer.from_pretrained('microsoft/DialoGPT-small', padding_side='left')
+model = AutoModelForCausalLM.from_pretrained('./DialoGPT-chatbot-emotion-aware')
+
+     
+
+Map:   0%|          | 0/11118 [00:00<?, ? examples/s]
+
+Map:   0%|          | 0/1000 [00:00<?, ? examples/s]
+
+Map:   0%|          | 0/1000 [00:00<?, ? examples/s]
+
+/usr/local/lib/python3.10/dist-packages/transformers/optimization.py:411: FutureWarning: This implementation of AdamW is deprecated and will be removed in a future version. Use the PyTorch implementation torch.optim.AdamW instead, or set `no_deprecation_warning=True` to disable this warning
+  warnings.warn(
+You're using a GPT2TokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+
+[6950/6950 13:18, Epoch 10/10]
+Step 	Training Loss 	Validation Loss
+500 	2.907600 	2.485167
+1000 	2.508100 	2.401554
+1500 	2.395700 	2.361978
+2000 	2.292000 	2.324861
+2500 	2.198000 	2.305645
+3000 	2.136500 	2.296316
+3500 	2.087900 	2.287933
+4000 	2.026800 	2.277987
+4500 	1.991900 	2.276940
+5000 	1.956600 	2.276367
+5500 	1.941100 	2.273433
+6000 	1.926300 	2.272633
+6500 	1.913400 	2.273103
+
+Evaluation
+
+# Evaluating the model on the validation dataset
+
+eval_results = trainer.evaluate()
+print(eval_results)
+
+# evaluating the model on the test dataset
+
+test_dataset=tokenized_datasets["test"]
+
+# Set the evaluation dataset to the test dataset
+trainer.eval_dataset = test_dataset
+
+# Run the evaluation
+eval_results = trainer.evaluate()
+
+# Print the evaluation results
+print(eval_results)
+     
+[16/16 00:03]
+
+{'eval_loss': 2.277987003326416, 'eval_runtime': 1.8159, 'eval_samples_per_second': 550.692, 'eval_steps_per_second': 8.811, 'epoch': 10.0}
+{'eval_loss': 2.288342237472534, 'eval_runtime': 1.7047, 'eval_samples_per_second': 586.623, 'eval_steps_per_second': 9.386, 'epoch': 10.0}
+
+Talking to the chatbot
+
+tokenizer = AutoTokenizer.from_pretrained('microsoft/DialoGPT-small', padding_side='left')
+model = AutoModelForCausalLM.from_pretrained('./DialoGPT-chatbot-emotion-aware')
+
+
+from transformers import pipeline
+
+emotion_model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=7)
+
+# Load the model weights
+state_dict = torch.load('emotion_detection_model.pt')
+
+# Apply the weights to the model
+emotion_model.load_state_dict(state_dict)
+
+emotion_tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
+
+emotion_classifier = pipeline('text-classification', model=emotion_model, tokenizer=emotion_tokenizer)
+
+from torch.nn.functional import softmax
+
+emotion_dict = {0: 'neutral', 1: 'anger', 2: 'disgust', 3: 'fear', 4: 'happiness', 5: 'sadness', 6: 'surprise'}
+
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+model = model.to(device)
+emotion_model = emotion_model.to(device)
+
+emotion_model.eval()
+
+for step in range(5):
+
+    user_message = input(">> User:")
+
+    # Prepare the message for input to the emotion model
+    encoded_input = emotion_tokenizer(user_message, return_tensors='pt').to(device)
+
+    # Get the detected emotion of the user's message
+    with torch.no_grad():
+        emotion_outputs = emotion_model(**encoded_input)
+
+    # Get the predicted emotion label
+    predicted_emotion_id = torch.argmax(emotion_outputs.logits, dim=1).item()
+    detected_emotion = emotion_dict[predicted_emotion_id]
+
+    # Prepend the detected emotion to the user's message
+    user_message = f"{detected_emotion}: {user_message}"
+
+    # Encode the new user input, add the eos_token and return a tensor in Pytorch
+    new_user_input_ids = tokenizer.encode(user_message + tokenizer.eos_token, return_tensors='pt')
+
+    # Only use the last user input
+    bot_input_ids = new_user_input_ids
+
+    # Generate a response
+    chat_history_ids = model.generate(bot_input_ids.to(device), max_length=50, num_return_sequences=1, pad_token_id=tokenizer.eos_token_id, do_sample=True, temperature=0.7)
+
+    # Decode the output and remove special tokens
+    output_text = tokenizer.decode(chat_history_ids[:, bot_input_ids.shape[-1]:][0], skip_special_tokens=True)
+
+    # Split the output into sentences
+    sentences = output_text.split('.')
+
+    # Print only the first sentence
+    print(f"DialoGPT: {sentences[0]}")
+
+    # # Pretty print last output tokens from bot
+    # print("DialoGPT: {}".format(tokenizer.decode(chat_history_ids[:, bot_input_ids.shape[-1]:][0], skip_special_token=True)))
+
+     
+
+Some weights of DistilBertForSequenceClassification were not initialized from the model checkpoint at distilbert-base-uncased and are newly initialized: ['classifier.weight', 'pre_classifier.bias', 'classifier.bias', 'pre_classifier.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+
+>> User:You look very nice tonight!
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+Bot: Thank you
+>> User:What's your name?
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+Bot: It's Jean-Shann
+>> User:Where are you from?
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+Bot: We're from China
+>> User:You like sushis?
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+Bot: Yes, I do
+>> User:Let's go out!
+
+A decoder-only architecture is being used, but right-padding was detected! For correct generation results, please set `padding_side='left'` when initializing the tokenizer.
+
+Bot: Yes, let's
+
